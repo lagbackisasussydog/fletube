@@ -6,6 +6,8 @@ import os
 import tempfile
 import imageio_ffmpeg
 import threading
+import subprocess
+import sys
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 COOKIES_PATH = os.path.join(os.path.dirname(__file__), 'youtube_cookies.txt')
@@ -19,7 +21,7 @@ def get_video_info(url):
         info = ydl.extract_info(url, download=False)
         return info
 
-def search_youtube(query, max_results=10):
+def search_youtube(query, max_results=50):
     ydl_opts = {'quiet': True, 'extract_flat': True}  # extract_flat = don't resolve full info per result, just get basic list (fast)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         search_query = f"ytsearch{max_results}:{query}"
@@ -68,10 +70,13 @@ def download_video(video_id: str, on_progress=None) -> str:
         'cookies': COOKIES_PATH,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web'],
+                'player_client': ['mweb'],
             }
         },
     }
+
+    if os.path.exists(COOKIES_PATH):
+        ydl_opts['cookies'] = COOKIES_PATH
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -139,7 +144,8 @@ def get_stream_url(video_id: str) -> str:
 
 def get_video_details(video_id: str) -> dict:
     url = f"https://www.youtube.com/watch?v={video_id}"
-    ydl_opts = {'quiet': True, 'skip_download': True}
+    ydl_opts = {'quiet': True, 'skip_download': True, 'cookiesfrombrowser': None,
+            'cookies': COOKIES_PATH}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return {
@@ -151,11 +157,16 @@ def get_video_details(video_id: str) -> dict:
 
 def main(page: ft.Page):
     page.title = "FleTube"
+    page.theme_mode = ft.ThemeMode.LIGHT
     page.vertical_alignment = ft.MainAxisAlignment.START
     page.horizontal_alignment = ft.CrossAxisAlignment.START
 
     tf1 = ft.TextField(multiline=False, label="Search", expand=True)
     results_list = ft.ListView(expand=True, spacing=5, padding=10)
+    page.bottom_appbar = ft.BottomAppBar(bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, content=ft.Row(alignment=ft.MainAxisAlignment.SPACE_AROUND, controls=[
+            ft.IconButton(ft.Icons.SEARCH),
+            ft.IconButton(ft.Icons.SETTINGS)
+        ],),)
 
     async def window_event(e: ft.WindowEvent):
         if e.type == ft.WindowEventType.CLOSE:
@@ -164,6 +175,112 @@ def main(page: ft.Page):
 
     page.window.prevent_close = True
     page.window.on_event = window_event
+
+    async def go_to_search_route(e):
+        await page.push_route("/")
+
+    async def go_to_settings_route(e):
+        await page.push_route("/settings")
+
+    bottom_bar = ft.BottomAppBar(
+        bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        content=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_AROUND,
+            controls=[
+                ft.IconButton(ft.Icons.SEARCH, on_click=go_to_search_route),
+                ft.IconButton(ft.Icons.SETTINGS, on_click=go_to_settings_route),
+            ],
+        ),
+    )
+
+    def build_settings_view():
+        async def go_back(e):
+            await page.push_route("/")
+
+        def get_login_status_text():
+            if os.path.exists(COOKIES_PATH):
+                mtime = os.path.getmtime(COOKIES_PATH)
+                import datetime
+                saved_time = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                return f"Logged in (session saved {saved_time})"
+            return "Not logged in"
+
+        login_status_text = ft.Text(get_login_status_text())
+
+        def login_clicked(e):
+            subprocess.Popen([sys.executable, "google_login.py"])
+            status_text.value = "Login window opened — complete it, then click Refresh below."
+            page.update()
+
+        def refresh_status_clicked(e):
+            login_status_text.value = get_login_status_text()
+            status_text.value = ""
+            page.update()
+
+        def clear_cache_clicked(e):
+            cleanup_all_downloads()
+            status_text.value = "Cache cleared."
+            page.update()
+
+        def theme_changed(e):
+            page.theme_mode = ft.ThemeMode.DARK if e.control.value else ft.ThemeMode.LIGHT
+            page.update()
+
+        status_text = ft.Text("")
+
+        return ft.View(
+            route="/settings",
+            bottom_appbar=bottom_bar,
+            controls=[
+                ft.AppBar(
+                    title=ft.Text("Settings"),
+                    leading=ft.IconButton(icon=ft.Icons.ARROW_BACK, on_click=go_back),
+                ),
+                ft.Container(
+                    padding=20,
+                    content=ft.Column(
+                        spacing=15,
+                        controls=[
+                            ft.Text("Account", size=18, weight=ft.FontWeight.BOLD),
+                            login_status_text,
+                            ft.Row(
+                                controls=[
+                                    ft.Button(
+                                        "Log in with Google",
+                                        icon=ft.Icons.LOGIN,
+                                        on_click=login_clicked,
+                                    ),
+                                    ft.OutlinedButton(
+                                        "Refresh status",
+                                        icon=ft.Icons.REFRESH,
+                                        on_click=refresh_status_clicked,
+                                    ),
+                                ],
+                            ),
+                            status_text,
+
+                            ft.Divider(),
+
+                            ft.Text("Appearance", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Switch(
+                                label="Dark mode",
+                                value=(page.theme_mode == ft.ThemeMode.DARK),
+                                on_change=theme_changed,
+                            ),
+
+                            ft.Divider(),
+
+                            ft.Text("Storage", size=18, weight=ft.FontWeight.BOLD),
+                            ft.ElevatedButton(
+                                "Clear downloaded video cache",
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                on_click=clear_cache_clicked,
+                            ),
+                        ],
+                    ),
+                ),
+            ],
+        )
 
     def cleanup_all_downloads():
         for video_id in list(downloaded_ids):
@@ -199,7 +316,12 @@ def main(page: ft.Page):
                     ft.ListTile(
                         title=ft.Text(title),
                         subtitle=ft.Text(video.get('uploader', '')),
-                        leading=ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE),
+                        leading=ft.Image(
+                            src=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                            width=100,
+                            height=100,
+                            fit=ft.BoxFit.COVER,
+                        ),
                         on_click=video_clicked(video_id, title),
                     )
                 )
@@ -211,6 +333,7 @@ def main(page: ft.Page):
     def build_search_view():
         return ft.View(
             route="/",
+            bottom_appbar=bottom_bar,
             controls=[
                 ft.Row(
                     alignment=ft.MainAxisAlignment.CENTER,
@@ -305,6 +428,7 @@ def main(page: ft.Page):
                     playlist=[ftv.VideoMedia(local_path)],
                     autoplay=True,
                     expand=True,
+                    playlist_mode=ftv.PlaylistMode.LOOP,
                 )
             except Exception as ex:
                 content_container.content = ft.Text(f"Error: {ex}")
@@ -340,6 +464,9 @@ def main(page: ft.Page):
                 title = route_parts[1].split("title=")[1]
 
             page.views.append(build_watch_view(video_id, title))
+
+        elif page.route == "/settings":
+            page.views.append(build_settings_view())
 
         page.update()
 
